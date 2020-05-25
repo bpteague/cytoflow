@@ -1,4 +1,4 @@
-.. _design:
+.. _dev_design:
 
 Project Structure
 -----------------

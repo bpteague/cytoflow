@@ -1,4 +1,6 @@
-======================
+.. _dev_release:
+
+
 Spinning a new release
 ======================
 

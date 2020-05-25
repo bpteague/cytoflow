@@ -1,4 +1,4 @@
-.. _install:
+.. _dev_install:
 
 Installation notes
 ==================

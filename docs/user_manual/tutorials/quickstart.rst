@@ -1,8 +1,7 @@
-.. _01_quickstart:
+.. _user_quickstart:
 
-**********
 Quickstart
-**********
+==========
 
 *Welcome to Cytoflow!*  This document will demonstrate importing
 some data and running a very basic analysis using the GUI.  It
