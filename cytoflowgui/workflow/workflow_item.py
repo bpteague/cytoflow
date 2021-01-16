@@ -1,46 +1,23 @@
-#!/usr/bin/env python3.4
-# coding: latin-1
-
-# (c) Massachusetts Institute of Technology 2015-2018
-# (c) Brian Teague 2018-2019
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 2 of the License, or
-# (at your option) any later version.
-# 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-# 
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 '''
-Created on Mar 15, 2015
+Created on Jan 15, 2021
+
 @author: brian
 '''
 
-import warnings, logging, sys, threading
-
-from traits.api import HasStrictTraits, Instance, List, DelegatesTo, Enum, \
-                       Property, cached_property, Bool, \
-                       Str, Dict, Any, Event, Tuple
-from traitsui.api import View, Item, Handler, InstanceEditor
-from pyface.qt import QtGui
-
-import matplotlib.pyplot as plt
+import sys, logging, warnings, threading
 
 import pandas as pd
+import matplotlib.pyplot as plt
+
+from traits.api import (HasStrictTraits, Instance, Str, Enum, Any, Dict, 
+                        Tuple, List, DelegatesTo)
 
 from cytoflow import Experiment
-from cytoflow.operations.i_operation import IOperation
-from cytoflow.views.i_view import IView
 from cytoflow.utility import CytoflowError, CytoflowOpError, CytoflowViewError
 
-# from cytoflowgui.flow_task_pane import TabListEditor
-from cytoflowgui.serialization import camel_registry
+from cytoflowgui.workflow.serialization import camel_registry
+from cytoflowgui.workflow.views import IWorkflowView
+from cytoflowgui.workflow.operations import IWorkflowOperation
 
 # http://stackoverflow.com/questions/1977362/how-to-create-module-wide-variables-in-python
 this = sys.modules[__name__]
@@ -65,22 +42,12 @@ class WorkflowItem(HasStrictTraits):
     name = DelegatesTo('operation')
     
     # the operation this Item wraps
-    operation = Instance(IOperation, copy = "ref")
+    operation = Instance(IWorkflowOperation, copy = "ref")
+    #operation_handler = Instance("Controller", transient = True)
     
-    # for the vertical notebook view, is this page deletable?
-    deletable = Bool(True)
-    
-    # the handler that's associated with this operation; we get it from the 
-    # operation plugin, and it controls what operation traits are in the UI
-    # and any special handling (heh) of them.  since the handler doesn't 
-    # maintain any state, we can make and destroy as needed.
-    operation_handler = Property(depends_on = 'operation', 
-                                 trait = Instance(Handler), 
-                                 transient = True)
-    
-    operation_traits = View(Item('operation_handler',
-                                 style = 'custom',
-                                 show_label = False))
+    # the IViews associated with this operation
+    views = List(IWorkflowView, copy = "ref")
+    #view_handlers = List(Instance("Controller"), transient = True)
     
     # the Experiment that is the result of applying *operation* to the
     # previous_wi WorkflowItem's ``result``
@@ -94,36 +61,9 @@ class WorkflowItem(HasStrictTraits):
     conditions = Dict(Str, pd.Series, status = True)
     metadata = Dict(Str, Any, status = True)
     statistics = Dict(Tuple(Str, Str), pd.Series, status = True)
-
-    # the IViews associated with this operation
-    views = List(IView, copy = "ref")
-    
-    # the currently selected view
-    current_view = Instance(IView, copy = "ref")
-    
-    # the handler for the currently selected view
-    current_view_handler = Property(depends_on = 'current_view',
-                                    trait = Instance(Handler),
-                                    transient = True) 
-    
-    current_view_traits = View(Item('current_view_handler',
-                                    style = 'custom',
-                                    show_label = False))
-    
-    # the view for the plot params
-    plot_params_traits = View(Item('current_view_handler',
-                                   editor = InstanceEditor(view = 'plot_params_traits'),
-                                   style = 'custom',
-                                   show_label = False))
-    
-    # the view for the current plot
-    current_plot_view = View(Item('current_view_handler',
-                                  editor = InstanceEditor(view = 'current_plot_view'),
-                                  style = 'custom',
-                                  show_label = False))
     
     # the default view for this workflow item
-    default_view = Instance(IView, copy = "ref")
+    default_view = Instance(IWorkflowView, copy = "ref")
     
     # the previous_wi WorkflowItem in the workflow
     previous_wi = Instance('WorkflowItem', transient = True)
@@ -146,97 +86,21 @@ class WorkflowItem(HasStrictTraits):
     view_error_trait = Str(status = True)
     view_warning = Str(status = True)
     view_warning_trait = Str(status = True)
-
-    # the central event to kick of WorkflowItem update logic
-    changed = Event
-    
-    # the icon for the vertical notebook view.  Qt specific, sadly.
-    icon = Property(depends_on = 'status', transient = True)  
-    
-    # synchronization primitive for updating wi traits
-    lock = Instance(threading.RLock, (), transient = True)
     
     # synchronization primitives for plotting
     matplotlib_events = Any(transient = True)
     plot_lock = Any(transient = True)
-           
-    # events to track number of times apply() and plot() are called
-    apply_called = Event
-    plot_called = Event
-           
-    @cached_property
-    def _get_icon(self):
-        if self.status == "valid":
-            return QtGui.QStyle.SP_DialogApplyButton  # @UndefinedVariable
-        elif self.status == "estimating" or self.status == "applying":
-            return QtGui.QStyle.SP_BrowserReload  # @UndefinedVariable
-        else: # self.valid == "invalid" or None
-            return QtGui.QStyle.SP_DialogCancelButton  # @UndefinedVariable
-        
-    @cached_property
-    def _get_operation_handler(self):
-        return self.operation.handler_factory(model = self.operation, context = self)
     
-    @cached_property
-    def _get_current_view_handler(self):
-        if self.current_view:
-            return self.current_view.handler_factory(model = self.current_view, context = self)
-        else:
-            return None
-        
+    # synchronization primitive for updating wi traits
+    lock = Instance(threading.RLock, (), transient = True)
+    
     def __str__(self):
         return "<{}: {}>".format(self.__class__.__name__, self.operation.__class__.__name__)
 
     def __repr__(self):
         return "<{}: {}>".format(self.__class__.__name__, self.operation.__class__.__name__)
     
-@camel_registry.dumper(WorkflowItem, 'workflow-item', version = 2)
-def _dump_wi(wi):
-                          
-    # we really don't need to keep copying around the fcs metadata
-    # it will still get saved out in the import op
-    if 'fcs_metadata' in wi.metadata:
-        del wi.metadata['fcs_metadata']
-                            
-    return dict(deletable = wi.deletable,
-                operation = wi.operation,
-                views = wi.views,
-                channels = wi.channels,
-                conditions = wi.conditions,
-                metadata = wi.metadata,
-                statistics = wi.statistics,
-                current_view = wi.current_view,
-                default_view = wi.default_view)
-    
-@camel_registry.dumper(WorkflowItem, 'workflow-item', version = 1)
-def _dump_wi_v1(wi):
-                            
-    return dict(deletable = wi.deletable,
-                operation = wi.operation,
-                views = wi.views,
-                channels = wi.channels,
-                conditions = wi.conditions,
-                metadata = wi.metadata,
-                statistics = list(wi.statistics.keys()),
-                current_view = wi.current_view,
-                default_view = wi.default_view)
-
-
-@camel_registry.loader('workflow-item', version = 1)
-def _load_wi_v1(data, version):
-    
-    data['statistics'] = {tuple(k) : pd.Series() for k in data['statistics']}
-    
-    ret = WorkflowItem(**data)
-        
-    return ret
-
-@camel_registry.loader('workflow-item', version = 2)
-def _load_wi(data, version):
-    return WorkflowItem(**data)
-    
-class RemoteWorkflowItem(WorkflowItem):
-    
+   
     def estimate(self):
         logger.debug("WorkflowItem.estimate :: {}".format((self)))
 
@@ -402,4 +266,49 @@ class RemoteWorkflowItem(WorkflowItem):
             return True
 
                     
-            
+
+    
+@camel_registry.dumper(WorkflowItem, 'workflow-item', version = 2)
+def _dump_wi(wi):
+                          
+    # we really don't need to keep copying around the fcs metadata
+    # it will still get saved out in the import op
+    if 'fcs_metadata' in wi.metadata:
+        del wi.metadata['fcs_metadata']
+                            
+    return dict(deletable = wi.deletable,
+                operation = wi.operation,
+                views = wi.views,
+                channels = wi.channels,
+                conditions = wi.conditions,
+                metadata = wi.metadata,
+                statistics = wi.statistics,
+                current_view = wi.current_view,
+                default_view = wi.default_view)
+    
+@camel_registry.dumper(WorkflowItem, 'workflow-item', version = 1)
+def _dump_wi_v1(wi):
+                            
+    return dict(deletable = wi.deletable,
+                operation = wi.operation,
+                views = wi.views,
+                channels = wi.channels,
+                conditions = wi.conditions,
+                metadata = wi.metadata,
+                statistics = list(wi.statistics.keys()),
+                current_view = wi.current_view,
+                default_view = wi.default_view)
+
+
+@camel_registry.loader('workflow-item', version = 1)
+def _load_wi_v1(data, version):
+    
+    data['statistics'] = {tuple(k) : pd.Series() for k in data['statistics']}
+    
+    ret = WorkflowItem(**data)
+        
+    return ret
+
+@camel_registry.loader('workflow-item', version = 2)
+def _load_wi(data, version):
+    return WorkflowItem(**data)

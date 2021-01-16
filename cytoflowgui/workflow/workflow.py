@@ -44,23 +44,19 @@ the plots are ferried back to the GUI, see the module docstring for
 matplotlib_backend.py
 """
 
-import threading, sys, logging, traceback
+import sys, threading, logging, traceback
 
-from queue import Queue
+from multiprocessing import Queue
+from queue import PriorityQueue
 
-from traits.api import (HasStrictTraits, Instance, List, on_trait_change, Any, 
-                        Bool, Int)
-                       
-from traitsui.api import View, Item, InstanceEditor, Spring
+from traits.api import (HasStrictTraits, Int, Bool, Instance, Any, List,
+                        on_trait_change)
 
 import matplotlib.pyplot as plt
-
-from cytoflow.views import IView
-
-from cytoflowgui.vertical_notebook_editor import VerticalNotebookEditor
-from cytoflowgui.workflow_item import WorkflowItem, RemoteWorkflowItem
-from cytoflowgui.util import UniquePriorityQueue, filter_unpicklable
 import cytoflowgui.matplotlib_backend_remote
+
+from .workflow_item import WorkflowItem
+from .views import IWorkflowView
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +151,6 @@ class Changed(object):
     # payload: unused
     PREV_RESULT = "PREV_RESULT"  
     
-    
 def log_exception():
     (exc_type, exc_value, tb) = sys.exc_info()
 
@@ -163,66 +158,60 @@ def log_exception():
     err_loc = traceback.format_tb(tb)[-1]
     err_ctx = threading.current_thread().name
     
-    logger.debug("Exception in {0}: {1}"
+    logging.debug("Exception in {0}: {1}"
                   .format(err_ctx,
                           "".join( traceback.format_exception(exc_type, exc_value, tb) )))
     
-    logger.error("Error: {0}\nLocation: {1}Thread: {2}" \
+    logging.error("Error: {0}\nLocation: {1}Thread: {2}" \
                   .format(err_string, err_loc, err_ctx) )
     
 
-class Workflow(HasStrictTraits):
+class UniquePriorityQueue(PriorityQueue):
+    """
+    A PriorityQueue that only allows one copy of each item.
+    http://stackoverflow.com/questions/5997189/how-can-i-make-a-unique-value-priority-queue-in-python
+    """
+    
+    def _init(self, maxsize):
+        PriorityQueue._init(self, maxsize)
+        self.values = set()
+
+    def _put(self, item):
+        if item[1] not in self.values:
+            self.values.add(item[1])
+            PriorityQueue._put(self, item)
+        else:
+            pass
+
+    def _get(self):
+        item = PriorityQueue._get(self)
+        self.values.remove(item[1])
+        return item
+    
+    
+def filter_unpicklable(obj):
+    if type(obj) is list:
+        return [filter_unpicklable(x) for x in obj]
+    elif type(obj) is dict:
+        return {x: filter_unpicklable(obj[x]) for x in obj}
+    else:
+        if not hasattr(obj, '__getstate__') and not isinstance(obj,
+                  (str, int, float, tuple, list, set, dict)):
+            return "filtered: {}".format(type(obj))
+        else:
+            return obj
+        
+
+
+    
+
+class LocalWorkflow(HasStrictTraits):
     
     workflow = List(WorkflowItem)
-    backup_workflow = List(WorkflowItem)  # for the TASBE task
     selected = Instance(WorkflowItem)
     
     modified = Bool
-    debug = Bool
-
-    single_operation = View(Item('selected',
-                                 editor = InstanceEditor(view = 'operation_traits'),
-                                 style = 'custom',
-                                 show_label = False))
-    
-    # a view for the entire workflow's list of operations 
-    operations_traits = View(Item('workflow',
-                                  editor = VerticalNotebookEditor(view = 'operation_traits',
-                                                                  page_name = '.name',
-                                                                  page_description = '.friendly_id',
-                                                                  page_icon = '.icon',
-                                                                  delete = True,
-                                                                  page_deletable = '.deletable',
-                                                                  selected = 'selected',
-                                                                  multiple_open = False),
-                                show_label = False),
-                             scrollable = True)
-
-    # a view showing the selected workflow item's current view
-    selected_view_traits = View(Item('selected',
-                                     editor = InstanceEditor(view = 'current_view_traits'),
-                                     style = 'custom',
-                                     show_label = False),
-                                Spring(),
-                                Item('apply_calls',
-                                     style = 'readonly',
-                                     visible_when = 'debug'),
-                                Item('plot_calls',
-                                     style = 'readonly',
-                                     visible_when = 'debug'),
-                                kind = 'panel',
-                                scrollable = True)
-    
-    # the view for the center pane
-    plot_view = View(Item('selected',
-                          editor = InstanceEditor(view = 'current_plot_view'),
-                          style = 'custom',
-                          show_label = False))
-    
-    plot_params_traits = View(Item('selected',
-                                   editor = InstanceEditor(view = 'plot_params_traits'),
-                                   style = 'custom',
-                                   show_label = False))
+#     debug = Bool
     
     recv_thread = Instance(threading.Thread)
     send_thread = Instance(threading.Thread)
@@ -246,7 +235,7 @@ class Workflow(HasStrictTraits):
     exec_event = Instance(threading.Event, ())
     
     def __init__(self, remote_connection, **kwargs):
-        super(Workflow, self).__init__(**kwargs)  
+        super(LocalWorkflow, self).__init__(**kwargs)  
         
         child_workflow_conn, self.child_matplotlib_conn = remote_connection
         
@@ -344,6 +333,30 @@ class Workflow(HasStrictTraits):
         except Exception:
             log_exception()
                 
+    def add_operation(self, operation):
+        # make a new workflow item
+        wi = WorkflowItem(operation = operation)
+        
+        # if the operation has a default view, add it to the wi
+        try:
+            wi.default_view = operation.default_view()
+            wi.views.append(wi.default_view)
+            wi.current_view = wi.default_view
+        except AttributeError:
+            pass
+        
+        # figure out where to add it
+        if self.selected:
+            idx = self.workflow.index(self.selected) + 1
+        else:
+            idx = len(self.workflow)
+              
+        # the add_remove_items handler takes care of updating the linked list
+        self.workflow.insert(idx, wi)
+         
+        # and make sure to actually select the new wi
+        self.selected = wi
+        
 
     def run_all(self):
         self.message_q.put((Msg.RUN_ALL, None))
@@ -399,7 +412,7 @@ class Workflow(HasStrictTraits):
                 self.workflow[idx + 1].previous_wi = self.workflow[idx]
                 
             self.message_q.put((Msg.ADD_ITEMS, (idx, event.added[0])))
- 
+            
     @on_trait_change('selected')
     def _on_selected_changed(self, obj, name, old, new):
         logger.debug("LocalWorkflow._on_selected_changed :: {}"
@@ -422,6 +435,7 @@ class Workflow(HasStrictTraits):
             idx = self.workflow.index(wi)
             self.message_q.put((Msg.UPDATE_OP, (idx, name, new)))
             self.modified = True
+            
 
     @on_trait_change('workflow:operation:changed')
     def _operation_changed_event(self, obj, _, new):
@@ -547,15 +561,12 @@ class Workflow(HasStrictTraits):
         # shut down the logging thread
 #         self.log_q.put(None)
 #         self.log_thread.join()
-        
-        
-        
+
 class RemoteWorkflow(HasStrictTraits):
-    workflow = List(RemoteWorkflowItem)
-    selected = Instance(RemoteWorkflowItem)
+    workflow = List(WorkflowItem)
+    selected = Instance(WorkflowItem)
     
-    plot_lock = Instance(threading.Lock, ())
-    last_view_plotted = Instance(IView)
+    last_view_plotted = Instance(IWorkflowView)
     
     send_thread = Instance(threading.Thread)
     recv_thread = Instance(threading.Thread)
@@ -588,7 +599,7 @@ class RemoteWorkflow(HasStrictTraits):
                                                                                           plot_lock = plot_lock, 
                                                                                           *args, 
                                                                                           **kwargs)
-        
+         
         # start threads
         self.recv_thread = threading.Thread(target = self.recv_main, 
                              name = "remote recv thread",
@@ -635,7 +646,7 @@ class RemoteWorkflow(HasStrictTraits):
                     self.workflow = []
                     for new_item in payload:
                         idx = len(self.workflow)
-                        wi = RemoteWorkflowItem()
+                        wi = WorkflowItem()
                         wi.lock.acquire()
                         wi.matplotlib_events = self.matplotlib_events
                         wi.plot_lock = self.plot_lock
@@ -662,7 +673,7 @@ class RemoteWorkflow(HasStrictTraits):
     
                 elif msg == Msg.ADD_ITEMS:
                     (idx, new_item) = payload
-                    wi = RemoteWorkflowItem()
+                    wi = WorkflowItem()
                     wi.lock.acquire()
                     wi.copy_traits(new_item)
                     wi.matplotlib_events = self.matplotlib_events
@@ -1006,3 +1017,6 @@ class RemoteWorkflow(HasStrictTraits):
         self.plot_calls += 1
         self.message_q.put((Msg.PLOT_CALLED, self.plot_calls))
 
+
+
+    
