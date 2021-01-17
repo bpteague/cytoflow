@@ -30,9 +30,7 @@ from traitsui.editors.api import RangeEditor
 from traitsui.editor_factory import EditorWithListFactory
 from traitsui.qt4.editor import EditorWithList
 
-from cytoflowgui.range_slider import RangeSlider
-
-
+from .range_slider import RangeSlider
 
 class _ValueBoundsEditor(EditorWithList):
     """

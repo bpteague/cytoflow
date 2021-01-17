@@ -531,7 +531,7 @@ class VerticalNotebook(HasPrivateTraits):
 if __name__ == '__main__':
 
     from traitsui.api import View, Group, Item
-    from .vertical_notebook_editor import VerticalNotebookEditor
+    from cytoflowgui.editors.vertical_notebook_editor import VerticalNotebookEditor
 
     class TestPageClass(HasTraits):
         trait1 = Str
@@ -556,7 +556,7 @@ if __name__ == '__main__':
                      )),
                     resizable = True)
 
-    from .event_tracer import record_events 
+    from cytoflowgui.utility import record_events 
     import os
             
     with record_events() as container:
